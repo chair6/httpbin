@@ -16,10 +16,10 @@ import random
 import base64
 
 from flask import Flask, Response, request, render_template, redirect, jsonify, make_response
-from raven.contrib.flask import Sentry
 from werkzeug.datastructures import WWWAuthenticate
 from werkzeug.http import http_date
 from werkzeug.wrappers import BaseResponse
+from six.moves import range as xrange
 
 from . import filters
 from .helpers import get_headers, status_code, get_dict, check_basic_auth, check_digest_auth, H, ROBOT_TXT, ANGRY_ASCII
@@ -40,11 +40,10 @@ ENV_COOKIES = (
 # Prevent WSGI from correcting the casing of the Location header
 BaseResponse.autocorrect_location_header = False
 
-app = Flask(__name__)
+# Find the correct template folder when running from a different location
+tmpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
-# Setup error collection
-sentry = Sentry(app)
-
+app = Flask(__name__, template_folder=tmpl_dir)
 
 # -----------
 # Middlewares
@@ -52,9 +51,11 @@ sentry = Sentry(app)
 @app.after_request
 def set_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
 
     if request.method == 'OPTIONS':
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        # Both of these headers are only used for the "preflight request"
+        # http://www.w3.org/TR/cors/#access-control-allow-methods-response-header
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS'
         response.headers['Access-Control-Max-Age'] = '3600'  # 1 hour cache
     return response
@@ -156,7 +157,8 @@ def view_patch():
 def view_delete():
     """Returns DETLETE Data."""
 
-    return jsonify(get_dict('url', 'args', 'data', 'origin', 'headers', 'json'))
+    return jsonify(get_dict(
+        'url', 'args', 'form', 'data', 'origin', 'headers', 'files', 'json'))
 
 
 @app.route('/gzip')
@@ -166,6 +168,15 @@ def view_gzip_encoded_content():
 
     return jsonify(get_dict(
         'origin', 'headers', method=request.method, gzipped=True))
+
+
+@app.route('/deflate')
+@filters.deflate
+def view_deflate_encoded_content():
+    """Returns Deflate-Encoded Data."""
+
+    return jsonify(get_dict(
+        'origin', 'headers', method=request.method, deflated=True))
 
 
 @app.route('/redirect/<int:n>')
@@ -230,7 +241,7 @@ def stream_n_messages(n):
         })
 
 
-@app.route('/status/<codes>')
+@app.route('/status/<codes>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'TRACE'])
 def view_status_code(codes):
     """Return status code or random status code if more than one are given"""
 
@@ -283,6 +294,13 @@ def view_cookies(hide_env=True):
                 pass
 
     return jsonify(cookies=cookies)
+
+
+@app.route('/forms/post')
+def view_forms_post():
+    """Simple HTML form."""
+
+    return render_template('forms-post.html')
 
 
 @app.route('/cookies/set/<name>/<value>')
@@ -343,13 +361,23 @@ def digest_auth(qop=None, user='user', passwd='passwd'):
     """Prompts the user for authorization using HTTP Digest auth"""
     if qop not in ('auth', 'auth-int'):
         qop = None
-    if not request.headers.get('Authorization'):
+    if 'Authorization' not in request.headers or  \
+                       not check_digest_auth(user, passwd) or \
+                       not 'Cookie' in request.headers:
         response = app.make_response('')
         response.status_code = 401
 
-        nonce = H("%s:%d:%s" % (request.remote_addr,
-                                  time.time(),
-                                  os.urandom(10)))
+        # RFC2616 Section4.2: HTTP headers are ASCII.  That means
+        # request.remote_addr was originally ASCII, so I should be able to
+        # encode it back to ascii.  Also, RFC2617 says about nonces: "The
+        # contents of the nonce are implementation dependent"
+        nonce = H(b''.join([
+            getattr(request,'remote_addr',u'').encode('ascii'),
+            b':',
+            str(time.time()).encode('ascii'),
+            b':',
+            os.urandom(10)
+        ]))
         opaque = H(os.urandom(10))
 
         auth = WWWAuthenticate("digest")
@@ -358,9 +386,6 @@ def digest_auth(qop=None, user='user', passwd='passwd'):
         response.headers['WWW-Authenticate'] = auth.to_header()
         response.headers['Set-Cookie'] = 'fake=fake_value'
         return response
-    elif not (check_digest_auth(user, passwd) and
-              request.headers.get('Cookie')):
-        return status_code(401)
     return jsonify(authenticated=True, user=user)
 
 
@@ -374,11 +399,31 @@ def delay_response(delay):
     return jsonify(get_dict(
         'url', 'args', 'form', 'data', 'origin', 'headers', 'files'))
 
+@app.route('/drip')
+def drip():
+    """Drips data over a duration after an optional initial delay."""
+    args = CaseInsensitiveDict(request.args.items())
+    duration = float(args.get('duration', 2))
+    numbytes = int(args.get('numbytes', 10))
+    pause = duration / numbytes
+
+    delay = float(args.get('delay', 0))
+    if delay > 0:
+        time.sleep(delay)
+
+    def generate_bytes():
+        for i in xrange(numbytes):
+            yield u"*".encode('utf-8')
+            time.sleep(pause)
+
+    return Response(generate_bytes(), headers={
+        "Content-Type": "application/octet-stream",
+        })
 
 @app.route('/base64/<value>')
 def decode_base64(value):
     """Decodes base64url-encoded string"""
-    encoded = value.encode('utf-8')
+    encoded = value.encode('utf-8') # base64 expects binary string as input
     return base64.urlsafe_b64decode(encoded).decode('utf-8')
 
 
@@ -414,7 +459,9 @@ def random_bytes(n):
         random.seed(int(params['seed']))
 
     response = make_response()
-    response.data = bytes().join(chr(random.randint(0, 255)) for i in xrange(n))
+
+    # Note: can't just use os.urandom here because it ignores the seed
+    response.data = bytearray(random.randint(0, 255) for i in range(n))
     response.content_type = 'application/octet-stream'
     return response
 
@@ -434,16 +481,16 @@ def stream_random_bytes(n):
         chunk_size = 10 * 1024
 
     def generate_bytes():
-        chunks = []
+        chunks = bytearray()
 
         for i in xrange(n):
-            chunks.append(chr(random.randint(0, 255)))
+            chunks.append(random.randint(0, 255))
             if len(chunks) == chunk_size:
-                yield(bytes().join(chunks))
-                chunks = []
+                yield(bytes(chunks))
+                chunks = bytearray()
 
         if chunks:
-            yield(bytes().join(chunks))
+            yield(bytes(chunks))
 
     headers = {'Transfer-Encoding': 'chunked',
                'Content-Type': 'application/octet-stream'}
@@ -486,6 +533,13 @@ def image():
         return Response(base64.b64decode('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k='), headers={'Content-Type': 'image/jpeg'})
     else:
         return status_code(404)
+
+
+@app.route("/xml")
+def xml():
+    response = make_response(render_template("sample.xml"))
+    response.headers["Content-Type"] = "application/xml"
+    return response
 
 
 if __name__ == '__main__':

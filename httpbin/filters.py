@@ -8,8 +8,9 @@ This module provides response filter decorators.
 """
 
 import gzip as gzip2
+import zlib
 
-from cStringIO import StringIO
+from six import BytesIO
 from decimal import Decimal
 from time import time as now
 
@@ -43,7 +44,7 @@ def gzip(f, *args, **kwargs):
     else:
         content = data
 
-    gzip_buffer = StringIO()
+    gzip_buffer = BytesIO()
     gzip_file = gzip2.GzipFile(
         mode='wb',
         compresslevel=4,
@@ -63,3 +64,27 @@ def gzip(f, *args, **kwargs):
 
     return gzip_data
 
+
+@decorator
+def deflate(f, *args, **kwargs):
+    """Deflate Flask Response Decorator."""
+
+    data = f(*args, **kwargs)
+
+    if isinstance(data, Response):
+        content = data.data
+    else:
+        content = data
+
+    deflater = zlib.compressobj()
+    deflated_data = deflater.compress(content)
+    deflated_data += deflater.flush()
+
+    if isinstance(data, Response):
+        data.data = deflated_data
+        data.headers['Content-Encoding'] = 'deflate'
+        data.headers['Content-Length'] = str(len(data.data))
+
+        return data
+
+    return deflated_data

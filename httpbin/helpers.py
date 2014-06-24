@@ -7,12 +7,13 @@ httpbin.helpers
 This module provides helper functions for httpbin.
 """
 
+import json
 import base64
-import simplejson as json
 from hashlib import md5
 from werkzeug.http import parse_authorization_header
 
 from flask import request, make_response
+from six.moves.urllib.parse import urlparse, urlunparse
 
 
 from .structures import CaseInsensitiveDict
@@ -75,13 +76,16 @@ def json_safe(string, content_type='application/octet-stream'):
     suitable for binary data, some additional encoding was necessary; "data"
     URL scheme was chosen for its simplicity.
     """
-
     try:
         _encoded = json.dumps(string)
         return string
-    except ValueError:
-        return ''.join(['data:%s;base64,' % content_type,
-                        base64.b64encode(string)])
+    except (ValueError, TypeError):
+        return b''.join([
+            b'data:',
+            content_type.encode('utf-8'),
+            b';base64,',
+            base64.b64encode(string)
+        ]).decode('utf-8')
 
 
 def get_files():
@@ -90,7 +94,14 @@ def get_files():
     files = dict()
 
     for k, v in request.files.items():
-        files[k] = json_safe(v.read(), request.files[k].content_type)
+        content_type = request.files[k].content_type or 'application/octet-stream'
+        val = json_safe(v.read(), content_type)
+        if files.get(k):
+            if not isinstance(files[k], list):
+                files[k] = [files[k]]
+            files[k].append(val)
+        else:
+            files[k] = val
 
     return files
 
@@ -110,6 +121,31 @@ def get_headers(hide_env=True):
     return CaseInsensitiveDict(headers.items())
 
 
+def semiflatten(multi):
+    """Convert a MutiDict into a regular dict. If there are more than one value
+    for a key, the result will have a list of values for the key. Otherwise it
+    will have the plain value."""
+    if multi:
+        result = multi.to_dict(flat=False)
+        for k, v in result.items():
+            if len(v) == 1:
+                result[k] = v[0]
+        return result
+    else:
+        return multi
+
+def get_url(request):
+    """
+    Since we might be hosted behind a proxy, we need to check the
+    X-Forwarded-Proto header to find out what protocol was used to access us.
+    """
+    if 'X-Forwarded-Proto' not in request.headers:
+        return request.url
+    url = list(urlparse(request.url))
+    url[0] = request.headers.get('X-Forwarded-Proto')
+    return urlunparse(url)
+
+
 def get_dict(*keys, **extras):
     """Returns request dict of given keys."""
 
@@ -119,28 +155,16 @@ def get_dict(*keys, **extras):
 
     data = request.data
     form = request.form
-
-    if (len(form) == 1) and (not data):
-        if not form.values().pop():
-            data = form.keys().pop()
-            form = None
-
-    if form:
-        nonflat_dict = form.to_dict(flat=False)
-        for k, v in nonflat_dict.items():
-            if len(v) == 1:
-                nonflat_dict[k] = v[0]
-        form = nonflat_dict
+    form = semiflatten(request.form)
 
     try:
-        _json = json.loads(data)
-    except ValueError:
+        _json = json.loads(data.decode('utf-8'))
+    except (ValueError, TypeError):
         _json = None
 
-
     d = dict(
-        url=request.url,
-        args=request.args,
+        url=get_url(request),
+        args=semiflatten(request.args),
         form=form,
         data=json_safe(data),
         origin=request.headers.get('X-Forwarded-For', request.remote_addr),
@@ -223,9 +247,11 @@ def HA1(realm, username, password):
 
     HA1 = md5(A1) = MD5(username:realm:password)
     """
-    return H("%s:%s:%s" % (username,
-                           realm,
-                           password))
+    if not realm:
+        realm = u''
+    return H(b":".join([username.encode('utf-8'),
+                           realm.encode('utf-8'),
+                           password.encode('utf-8')]))
 
 
 def HA2(credentails, request):
@@ -237,7 +263,7 @@ def HA2(credentails, request):
         HA2 = md5(A2) = MD5(method:digestURI:MD5(entityBody))
     """
     if credentails.get("qop") == "auth" or credentails.get('qop') is None:
-        return H("%s:%s" % (request['method'], request['uri']))
+        return H(b":".join([request['method'].encode('utf-8'), request['uri'].encode('utf-8')]))
     elif credentails.get("qop") == "auth-int":
         for k in 'method', 'uri', 'body':
             if k not in request:
@@ -262,20 +288,28 @@ def response(credentails, password, request):
     - `request`: request dict
     """
     response = None
-    HA1_value = HA1(credentails.get('realm'), credentails.get('username'), password)
+    HA1_value = HA1(
+        credentails.get('realm'),
+        credentails.get('username'),
+        password
+    )
     HA2_value = HA2(credentails, request)
     if credentails.get('qop') is None:
-        response = H(":".join([HA1_value, credentails.get('nonce'), HA2_value]))
+        response = H(b":".join([
+            HA1_value.encode('utf-8'), 
+            credentails.get('nonce').encode('utf-8'), 
+            HA2_value.encode('utf-8')
+        ]))
     elif credentails.get('qop') == 'auth' or credentails.get('qop') == 'auth-int':
         for k in 'nonce', 'nc', 'cnonce', 'qop':
             if k not in credentails:
                 raise ValueError("%s required for response H" % k)
-        response = H(":".join([HA1_value,
-                               credentails.get('nonce'),
-                               credentails.get('nc'),
-                               credentails.get('cnonce'),
-                               credentails.get('qop'),
-                               HA2_value]))
+        response = H(b":".join([HA1_value.encode('utf-8'),
+                               credentails.get('nonce').encode('utf-8'),
+                               credentails.get('nc').encode('utf-8'),
+                               credentails.get('cnonce').encode('utf-8'),
+                               credentails.get('qop').encode('utf-8'),
+                               HA2_value.encode('utf-8')]))
     else:
         raise ValueError("qop value are wrong")
 
