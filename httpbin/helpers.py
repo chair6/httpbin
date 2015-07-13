@@ -39,12 +39,15 @@ ENV_HEADERS = (
     'X-Heroku-Queue-Depth',
     'X-Real-Ip',
     'X-Forwarded-Proto',
+    'X-Forwarded-Protocol',
+    'X-Forwarded-Ssl',
     'X-Heroku-Queue-Wait-Time',
     'X-Forwarded-For',
     'X-Heroku-Dynos-In-Use',
     'X-Forwarded-For',
     'X-Forwarded-Protocol',
-    'X-Forwarded-Port'
+    'X-Forwarded-Port',
+    'Runscope-Service'
 )
 
 ROBOT_TXT = """User-agent: *
@@ -61,7 +64,7 @@ ANGRY_ASCII ="""
        \  .-"`  `"-.  /
         '.          .'
           '-......-'
-      YOU SHOUDN'T BE HERE
+     YOU SHOULDN'T BE HERE
 """
 
 
@@ -77,6 +80,7 @@ def json_safe(string, content_type='application/octet-stream'):
     URL scheme was chosen for its simplicity.
     """
     try:
+        string = string.decode('utf-8')
         _encoded = json.dumps(string)
         return string
     except (ValueError, TypeError):
@@ -137,12 +141,16 @@ def semiflatten(multi):
 def get_url(request):
     """
     Since we might be hosted behind a proxy, we need to check the
-    X-Forwarded-Proto header to find out what protocol was used to access us.
+    X-Forwarded-Proto, X-Forwarded-Protocol, or X-Forwarded-SSL headers
+    to find out what protocol was used to access us.
     """
-    if 'X-Forwarded-Proto' not in request.headers:
+    protocol = request.headers.get('X-Forwarded-Proto') or request.headers.get('X-Forwarded-Protocol')
+    if protocol is None and request.headers.get('X-Forwarded-Ssl') == 'on':
+        protocol = 'https'
+    if protocol is None:
         return request.url
     url = list(urlparse(request.url))
-    url[0] = request.headers.get('X-Forwarded-Proto')
+    url[0] = protocol
     return urlunparse(url)
 
 
@@ -152,7 +160,6 @@ def get_dict(*keys, **extras):
     _keys = ('url', 'args', 'form', 'data', 'origin', 'headers', 'files', 'json')
 
     assert all(map(_keys.__contains__, keys))
-
     data = request.data
     form = request.form
     form = semiflatten(request.form)
@@ -297,7 +304,7 @@ def response(credentails, password, request):
     if credentails.get('qop') is None:
         response = H(b":".join([
             HA1_value.encode('utf-8'), 
-            credentails.get('nonce').encode('utf-8'), 
+            credentails.get('nonce', '').encode('utf-8'),
             HA2_value.encode('utf-8')
         ]))
     elif credentails.get('qop') == 'auth' or credentails.get('qop') == 'auth-int':
@@ -323,9 +330,70 @@ def check_digest_auth(user, passwd):
         credentails = parse_authorization_header(request.headers.get('Authorization'))
         if not credentails:
             return
-        response_hash = response(credentails, passwd, dict(uri=request.path,
+        response_hash = response(credentails, passwd, dict(uri=request.script_root + request.path,
                                                            body=request.data,
                                                            method=request.method))
-        if credentails['response'] == response_hash:
+        if credentails.get('response') == response_hash:
             return True
     return False
+
+def secure_cookie():
+    """Return true if cookie should have secure attribute"""
+    return request.environ['wsgi.url_scheme'] == 'https'
+
+def __parse_request_range(range_header_text):
+    """ Return a tuple describing the byte range requested in a GET request
+    If the range is open ended on the left or right side, then a value of None
+    will be set.
+    RFC7233: http://svn.tools.ietf.org/svn/wg/httpbis/specs/rfc7233.html#header.range
+    Examples:
+      Range : bytes=1024-
+      Range : bytes=10-20
+      Range : bytes=-999
+    """
+
+    left = None
+    right = None
+
+    if not range_header_text:
+        return left, right
+
+    range_header_text = range_header_text.strip()
+    if not range_header_text.startswith('bytes'):
+        return left, right
+
+    components = range_header_text.split("=")
+    if len(components) != 2:
+        return left, right
+
+    components = components[1].split("-")
+
+    try:
+        right = int(components[1])
+    except:
+        pass
+
+    try:
+        left = int(components[0])
+    except:
+        pass
+
+    return left, right
+
+def get_request_range(request_headers, upper_bound):
+    first_byte_pos, last_byte_pos = __parse_request_range(request_headers['range'])
+
+    if first_byte_pos is None and last_byte_pos is None:
+        # Request full range
+        first_byte_pos = 0
+        last_byte_pos = upper_bound - 1
+    elif first_byte_pos is None:
+        # Request the last X bytes
+        first_byte_pos = max(0, upper_bound - last_byte_pos)
+        last_byte_pos = upper_bound - 1
+    elif last_byte_pos is None:
+        # Request the last X bytes
+        last_byte_pos = upper_bound - 1
+
+    return first_byte_pos, last_byte_pos
+
