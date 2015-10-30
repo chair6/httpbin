@@ -7,10 +7,10 @@ flavors by `Runscope <https://www.runscope.com/>`__
 
 |Build Status|
 
-STACKATO
---------
+HPE HELION STACKATO
+-------------------
 
-To deploy to Stackato
+To deploy to HPE Helion Stackato
 
     $ stackato push -n
 
