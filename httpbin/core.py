@@ -92,8 +92,8 @@ def set_cors_headers(response):
 @app.route('/')
 def view_landing_page():
     """Generates Landing Page."""
-
-    return render_template('index.html')
+    tracking_enabled = 'HTTPBIN_TRACKING' in os.environ
+    return render_template('index.html', tracking_enabled=tracking_enabled)
 
 
 @app.route('/html')
@@ -179,7 +179,7 @@ def view_patch():
 
 @app.route('/delete', methods=('DELETE',))
 def view_delete():
-    """Returns DETLETE Data."""
+    """Returns DELETE Data."""
 
     return jsonify(get_dict(
         'url', 'args', 'form', 'data', 'origin', 'headers', 'files', 'json'))
@@ -280,7 +280,6 @@ def stream_n_messages(n):
             yield json.dumps(response) + '\n'
 
     return Response(generate_stream(), headers={
-        "Transfer-Encoding": "chunked",
         "Content-Type": "application/json",
         })
 
@@ -439,15 +438,16 @@ def digest_auth(qop=None, user='user', passwd='passwd'):
     return jsonify(authenticated=True, user=user)
 
 
-@app.route('/delay/<int:delay>')
+@app.route('/delay/<delay>')
 def delay_response(delay):
     """Returns a delayed response"""
-    delay = min(delay, 10)
+    delay = min(float(delay), 10)
 
     time.sleep(delay)
 
     return jsonify(get_dict(
         'url', 'args', 'form', 'data', 'origin', 'headers', 'files'))
+
 
 @app.route('/drip')
 def drip():
@@ -553,8 +553,7 @@ def stream_random_bytes(n):
         if chunks:
             yield(bytes(chunks))
 
-    headers = {'Transfer-Encoding': 'chunked',
-               'Content-Type': 'application/octet-stream'}
+    headers = {'Content-Type': 'application/octet-stream'}
 
     return Response(generate_bytes(), headers=headers)
 
@@ -570,7 +569,7 @@ def range_request(numbytes):
         response.status_code = 404
         response.data = 'number of bytes must be in the range (0, 10240]'
         return response
-    
+
     params = CaseInsensitiveDict(request.args.items())
     if 'chunk_size' in params:
         chunk_size = max(1, int(params['chunk_size']))
@@ -611,7 +610,6 @@ def range_request(numbytes):
 
     content_range = 'bytes %d-%d/%d' % (first_byte_pos, last_byte_pos, numbytes)
     response_headers = {
-        'Transfer-Encoding': 'chunked',
         'Content-Type': 'application/octet-stream',
         'ETag' : 'range%d' % numbytes,
         'Accept-Ranges' : 'bytes',
@@ -657,17 +655,19 @@ def image():
     headers = get_headers()
     if 'accept' not in headers:
         return image_png() # Default media type to png
-    
+
     accept = headers['accept'].lower()
 
     if 'image/webp' in accept:
         return image_webp()
+    elif 'image/svg+xml' in accept:
+        return image_svg()
     elif 'image/jpeg' in accept:
         return image_jpeg()
     elif 'image/png' in accept or 'image/*' in accept:
         return image_png()
     else:
-        return status_code(404)
+        return status_code(406) # Unsupported media type
 
 
 @app.route('/image/png')
@@ -686,6 +686,12 @@ def image_jpeg():
 def image_webp():
     data = resource('images/wolf_1.webp')
     return Response(data, headers={'Content-Type': 'image/webp'})
+
+
+@app.route('/image/svg')
+def image_svg():
+    data = resource('images/svg_logo.svg')
+    return Response(data, headers={'Content-Type': 'image/svg+xml'})
 
 
 def resource(filename):
