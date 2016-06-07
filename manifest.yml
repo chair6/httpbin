@@ -1,3 +1,15 @@
 applications:
 - name: httpbin
   memory: 128M
+  url: []
+  services:
+    ${name}-fs:
+        type: filesystem
+    ${name}-port:
+        type: harbor
+  stackato:
+    hooks:
+      pre-running:
+      - python show-info.py
+    ignores:
+    - ca-infra

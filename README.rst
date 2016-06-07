@@ -12,6 +12,77 @@ flavors by `Runscope <https://www.runscope.com/>`__
 
 |Build Status|
 
+TLS EXPERIMENTATION
+-------------------
+
+This fork experiments with exposing the application via Harbor, terminating
+TLS at the application itself (the gunicorn process).
+
+It provides three different Procfile variants; one that exposes an HTTP
+service, one that exposes a standard TLS service, and one that requires TLS
+with mutual authentication.
+
+It also adds a basic script to create server & client certificates for
+testing.
+
+Starting with a newly created Helion Stackato micro-cloud (http://docs.stackato.com/admin/setup/microcloud.html):
+
+1. Setup nip.io DNS and enable Harbor service.  Logged in to the Stackato VM:
+
+* Rename node to use nip.io:
+
+::
+
+    $ kato node rename 192.168.55.133.nip.io
+
+* Set node as core:
+
+::
+
+    $ kato node setup core api.192.168.55.133.nip.io
+
+* Add necessary roles to core:
+
+::
+
+    $ kato role add filesystem
+    $ kato role add dea
+    $ kato role add harbor
+
+2. In httpbin-tls/ca-infra, update initialize.sh to use correct DNS name &
+execute. Check for httpbin-tls/ca-dist, which is where the test keys &
+certificates will be copied to.
+
+3. In httpbin-tls/, copy the relevant Procfile.* to Procfile for the use case
+you're testing.
+
+4. Deploy to Stackato:
+
+::
+
+    $ stackato push -n
+
+5. Look at output from push for pointers re. testing the app:
+
+::
+
+    stackato[dea_ng.0]: Launching web process: gunicorn httpbin:app -w 6 -b $VCAP_APP_HOST:$STACKATO_HARBOR --certfile=$HOME/ca-dist/server.crt --keyfile=$HOME/ca-dist/server.key --ca-certs=$HOME/ca-dist/chain.crt --cert-reqs 2 --log-file -
+    stackato[dea_ng.0]: Instance is ready
+    app[stdout.0]: ********************
+    app[stdout.0]: httpbin will be available via Harbor on 192.168.55.133:37803
+    app[stdout.0]:
+    app[stdout.0]: Example of connecting using curl when service does not have TLS enabled:
+    app[stdout.0]:   $ curl http://192.168.55.133.nip.io:37803/get?foo=bar
+    app[stdout.0]:
+    app[stdout.0]: Example of connecting using curl when service has TLS enabled:
+    app[stdout.0]:   $ curl --cacert ca-dist/chain.crt https://192.168.55.133.nip.io:37803/get?foo=bar
+    app[stdout.0]:
+    app[stdout.0]: Example of connecting using curl when service has TLS enabled, & presenting a client certificate:
+    app[stdout.0]:   $ curl --cacert ca-dist/chain.crt https://192.168.55.133.nip.io:37803/get?foo=bar --cert ca-dist/client1.crt --key ca-dist/client1.key
+    app[stdout.0]:
+    app[stdout.0]: ********************
+
+
 HPE HELION STACKATO
 -------------------
 
