@@ -7,3 +7,6 @@ dist/
 .tox
 *.egg-info
 *.swp
+ca-infra/root
+ca-infra/intermediate
+ca-dist/
